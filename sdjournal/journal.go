@@ -37,6 +37,8 @@ import (
 	"sync"
 	"time"
 	"unsafe"
+        "strings"
+	"unicode/utf8"
 )
 
 // Journal entry field strings which correspond to:
@@ -248,6 +250,102 @@ func (j *Journal) GetData(field string) (string, error) {
 	msg := C.GoStringN((*C.char)(d), C.int(l))
 
 	return msg, nil
+}
+func splitNameValue(fieldData []byte) (string, []byte) {
+		var field string
+		var value []byte
+		for i, r := range fieldData {
+			if r == '=' {
+				field = string(fieldData[:i])
+				value = fieldData[i+1:]
+				return field, value
+			}
+		}
+		return "", []byte{}
+	}
+func addToMap(hashmap map[string]interface{}, name string, value []byte) {
+		v, ok := hashmap[name]
+		if !ok {
+			// if the field does not exist, simply add the value
+			if utf8.Valid(value) {
+				hashmap[name] = string(value)
+			} else {
+				hashmap[name] = value
+			}
+		} else {
+			// if the field does exist, make it a slice and append
+			switch t := v.(type) {
+			default:
+				fmt.Printf("Unexpected type: %T\n", t)
+			case string:
+				// NOTE: it is assumed here that consecutive fields with the same name are also UTF-8 strings
+				hashmap[name] = []string{t, string(value)}
+			case []byte:
+				hashmap[name] = [][]byte{t, value}
+			case []string:
+				// NOTE: it is assumed here that consecutive fields with the same name are also UTF-8 strings
+				hashmap[name] = append(t, string(value))
+			case [][]byte:
+				hashmap[name] = append(t, value)
+			}	
+		}
+	}
+
+
+func  (j *Journal) GetDataAll() (map[string]interface{}, error) {
+	data := make(map[string]interface{})
+
+	
+
+	
+
+        var d unsafe.Pointer
+        var l C.size_t
+	
+	var cboot_id C.sd_id128_t
+	//var csid [33]C.char
+	var crealtime C.uint64_t
+	var cmonotonic C.uint64_t
+	//var ccursor unsafe.Pointer
+		
+        j.mu.Lock()
+	// not in their own fields
+	C.sd_journal_set_data_threshold(j.cjournal, 0)
+	C.sd_journal_get_realtime_usec(j.cjournal, &crealtime)
+	C.sd_journal_get_monotonic_usec(j.cjournal, &cmonotonic, &cboot_id)
+	//sd_id128_to_string(cboot_id, csid)
+	//C.sd_journal_get_cursor(j.cjournal, &ccursor)
+
+	// reset to start the loop
+        C.sd_journal_restart_data(j.cjournal)
+        j.mu.Unlock()
+
+	realtime := uint64(crealtime)
+	monotonic := uint64(cmonotonic)
+	//cursor := C.GoString(&ccursor)
+	//bootid := C.GoString(&csid)
+
+	//data["__CURSOR"] = cursor
+	data["__REALTIME_TIMESTAMP"] = realtime
+	data["__MONOTONIC_TIMESTAMP"] = monotonic
+	//data["__BOOT_ID"] = bootid
+
+        for {
+		// retrieve new field
+		j.mu.Lock()
+                r := C.sd_journal_enumerate_data(j.cjournal, &d, &l)
+		j.mu.Unlock()
+
+		if r <= 0 {
+			break
+		}
+
+		fieldData := C.GoBytes(d, C.int(l))
+		name, value := splitNameValue(fieldData)
+		addToMap(data, name, value)
+        }
+
+	return data, nil
 }
 
 // GetDataValue gets the data object associated with a specific field from the
