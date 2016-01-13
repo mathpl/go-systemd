@@ -27,6 +27,7 @@ package sdjournal
 /*
 #cgo pkg-config: libsystemd
 #include <systemd/sd-journal.h>
+#include <systemd/sd-id128.h>
 #include <stdlib.h>
 #include <syslog.h>
 */
@@ -34,11 +35,11 @@ import "C"
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
-	"unsafe"
-        "strings"
 	"unicode/utf8"
+	"unsafe"
 )
 
 // Journal entry field strings which correspond to:
@@ -73,6 +74,9 @@ type Journal struct {
 	cjournal *C.sd_journal
 	mu       sync.Mutex
 }
+
+// JournalEntry is an alias for map[string]interface{}
+type JournalEntry map[string]interface{}
 
 // Match is a convenience wrapper to describe filters supplied to AddMatch.
 type Match struct {
@@ -252,98 +256,94 @@ func (j *Journal) GetData(field string) (string, error) {
 	return msg, nil
 }
 func splitNameValue(fieldData []byte) (string, []byte) {
-		var field string
-		var value []byte
-		for i, r := range fieldData {
-			if r == '=' {
-				field = string(fieldData[:i])
-				value = fieldData[i+1:]
-				return field, value
-			}
+	var field string
+	var value []byte
+	for i, r := range fieldData {
+		if r == '=' {
+			field = string(fieldData[:i])
+			value = fieldData[i+1:]
+			return field, value
 		}
-		return "", []byte{}
 	}
-func addToMap(hashmap map[string]interface{}, name string, value []byte) {
-		v, ok := hashmap[name]
-		if !ok {
-			// if the field does not exist, simply add the value
-			if utf8.Valid(value) {
-				hashmap[name] = string(value)
-			} else {
-				hashmap[name] = value
-			}
+	return "", []byte{}
+}
+func addToMap(hashmap JournalEntry, name string, value []byte) {
+	v, ok := hashmap[name]
+	if !ok {
+		// if the field does not exist, simply add the value
+		if utf8.Valid(value) {
+			hashmap[name] = string(value)
 		} else {
-			// if the field does exist, make it a slice and append
-			switch t := v.(type) {
-			default:
-				fmt.Printf("Unexpected type: %T\n", t)
-			case string:
-				// NOTE: it is assumed here that consecutive fields with the same name are also UTF-8 strings
-				hashmap[name] = []string{t, string(value)}
-			case []byte:
-				hashmap[name] = [][]byte{t, value}
-			case []string:
-				// NOTE: it is assumed here that consecutive fields with the same name are also UTF-8 strings
-				hashmap[name] = append(t, string(value))
-			case [][]byte:
-				hashmap[name] = append(t, value)
-			}	
+			hashmap[name] = value
+		}
+	} else {
+		// if the field does exist, make it a slice and append
+		switch t := v.(type) {
+		default:
+			fmt.Printf("Unexpected type: %T\n", t)
+		case string:
+			// NOTE: it is assumed here that consecutive fields with the same name are also UTF-8 strings
+			hashmap[name] = []string{t, string(value)}
+		case []byte:
+			hashmap[name] = [][]byte{t, value}
+		case []string:
+			// NOTE: it is assumed here that consecutive fields with the same name are also UTF-8 strings
+			hashmap[name] = append(t, string(value))
+		case [][]byte:
+			hashmap[name] = append(t, value)
 		}
 	}
+}
 
+func (j *Journal) GetDataAll() (JournalEntry, error) {
+	data := make(JournalEntry)
 
-func  (j *Journal) GetDataAll() (map[string]interface{}, error) {
-	data := make(map[string]interface{})
-
-	
-
-	
-
-        var d unsafe.Pointer
-        var l C.size_t
-	
+	var d unsafe.Pointer
+	var l C.size_t
 	var cboot_id C.sd_id128_t
-	//var csid [33]C.char
+	var csid = C.CString("123456789012345678901234567890123")
+	defer C.free(unsafe.Pointer(csid))
 	var crealtime C.uint64_t
 	var cmonotonic C.uint64_t
-	//var ccursor unsafe.Pointer
-		
-        j.mu.Lock()
+	var ccursor *C.char
+	j.mu.Lock()
 	// not in their own fields
 	C.sd_journal_set_data_threshold(j.cjournal, 0)
 	C.sd_journal_get_realtime_usec(j.cjournal, &crealtime)
 	C.sd_journal_get_monotonic_usec(j.cjournal, &cmonotonic, &cboot_id)
-	//sd_id128_to_string(cboot_id, csid)
-	//C.sd_journal_get_cursor(j.cjournal, &ccursor)
+	C.sd_id128_to_string(cboot_id, csid)
+	C.sd_journal_get_cursor(j.cjournal, (**C.char)(&ccursor))
+	defer C.free(unsafe.Pointer(ccursor))
 
 	// reset to start the loop
-        C.sd_journal_restart_data(j.cjournal)
-        j.mu.Unlock()
+	C.sd_journal_restart_data(j.cjournal)
+	j.mu.Unlock()
 
 	realtime := uint64(crealtime)
 	monotonic := uint64(cmonotonic)
-	//cursor := C.GoString(&ccursor)
-	//bootid := C.GoString(&csid)
+	cursor := C.GoString(ccursor)
+	bootid := C.GoString(csid)
 
-	//data["__CURSOR"] = cursor
+	data["__CURSOR"] = cursor
 	data["__REALTIME_TIMESTAMP"] = realtime
 	data["__MONOTONIC_TIMESTAMP"] = monotonic
-	//data["__BOOT_ID"] = bootid
+	data["__BOOT_ID"] = bootid
 
-        for {
+	for {
 		// retrieve new field
 		j.mu.Lock()
-                r := C.sd_journal_enumerate_data(j.cjournal, &d, &l)
+		r := C.sd_journal_enumerate_data(j.cjournal, &d, &l)
 		j.mu.Unlock()
 
 		if r <= 0 {
+
 			break
 		}
 
 		fieldData := C.GoBytes(d, C.int(l))
 		name, value := splitNameValue(fieldData)
 		addToMap(data, name, value)
-        }
+	}
 
 	return data, nil
 }
@@ -390,6 +390,19 @@ func (j *Journal) GetRealtimeUsec() (uint64, error) {
 	return uint64(usec), nil
 }
 
+//SeekHead seeks to the beginning of the journal, i.e. the oldest available entry.
+func (j *Journal) SeekHead() error {
+	j.mu.Lock()
+	r := C.sd_journal_seek_head(j.cjournal)
+	j.mu.Unlock()
+
+	if r < 0 {
+		return fmt.Errorf("failed to seek to head of journal: %d", r)
+	}
+
+	return nil
+}
+
 // SeekTail may be used to seek to the end of the journal, i.e. the most recent
 // available entry.
 func (j *Journal) SeekTail() error {
@@ -404,6 +417,29 @@ func (j *Journal) SeekTail() error {
 	return nil
 }
 
+// SeekMonotonicUsec seeks to the entry with the specified monotonic timestamp,
+// i.e. CLOCK_MONOTONIC. Since monotonic time restarts on every reboot a boot ID needs
+// to be specified as well.
+func (j *Journal) SeekMonotonicUsec(boot_id string, usec uint64) error {
+	// get the boot_id first
+	cs := C.CString(boot_id)
+	defer C.free(unsafe.Pointer(cs))
+	var cboot_id C.sd_id128_t
+	r := C.sd_id128_from_string(cs, &cboot_id)
+	if r < 0 {
+		return fmt.Errorf("failed to retrieve 128bit ID from string '%s': %d", boot_id, r)
+	}
+
+	j.mu.Lock()
+	r = C.sd_journal_seek_monotonic_usec(j.cjournal, cboot_id, C.uint64_t(usec))
+	j.mu.Unlock()
+
+	if r < 0 {
+		return fmt.Errorf("failed to seek to monotonic_clock(%s, %d): %d", boot_id, usec, r)
+	}
+	return nil
+}
+
 // SeekRealtimeUsec seeks to the entry with the specified realtime (wallclock)
 // timestamp, i.e. CLOCK_REALTIME.
 func (j *Journal) SeekRealtimeUsec(usec uint64) error {
@@ -412,10 +448,70 @@ func (j *Journal) SeekRealtimeUsec(usec uint64) error {
 	j.mu.Unlock()
 
 	if r < 0 {
-		return fmt.Errorf("failed to seek to %d: %d", usec, r)
+		return fmt.Errorf("failed to seek to realtime_clock(%d): %d", usec, r)
 	}
 
 	return nil
+}
+
+// SeekCursor seeks to the entry located at the specified cursor string. If no entry
+// matching the specified cursor is found the call will seek to the next closest entry
+// (in terms of time) instead. SeekCursor returns true if it was able to seek to the
+// exact postion, or false, if it was able to only seek to the next closest position.
+// It returns an error if the operation failed completely
+func (j *Journal) SeekCursor(cursor string) error {
+	ccursor := C.CString(cursor)
+	defer C.free(unsafe.Pointer(ccursor))
+
+	j.mu.Lock()
+	r := C.sd_journal_seek_cursor(j.cjournal, ccursor)
+	j.mu.Unlock()
+
+	if r < 0 {
+		return fmt.Errorf("failed to seek to cursor '%s': %d", cursor, r)
+	}
+
+	return nil
+}
+
+// GetCursor returns a cursor string for the current journal entry. A cursor is a serialization of the current journal position formatted as text. The string only contains printable characters and can be passed around in text form. The cursor identifies a journal entry globally and in a stable way and may be used to later seek to it via SeekCursor.
+func (j *Journal) GetCursor() (string, error) {
+	var ccursor *C.char
+
+	j.mu.Lock()
+	r := C.sd_journal_get_cursor(j.cjournal, (**C.char)(&ccursor))
+	j.mu.Unlock()
+
+	defer C.free(unsafe.Pointer(ccursor))
+
+	if r < 0 {
+		return "", fmt.Errorf("failed to get cursor: %d", r)
+	}
+
+	return C.GoString(ccursor), nil
+}
+
+// TestCursor  may be used to check whether the current position in the journal matches the specified cursor. This is useful since cursor strings do not uniquely identify an entry: the same entry might be referred to by multiple different cursor strings, and hence string comparing cursors is not possible. Use this call to verify after an invocation of SeekCursor whether the entry being sought to was actually found in the journal or the next closest entry was used instead.
+func (j *Journal) TestCursor(cursor string) (bool, error) {
+	ccursor := C.CString(cursor)
+	defer C.free(unsafe.Pointer(ccursor))
+
+	j.mu.Lock()
+	r := C.sd_journal_test_cursor(j.cjournal, ccursor)
+	j.mu.Unlock()
+
+	// testing failed if negative zero
+	if r < 0 {
+		return false, fmt.Errorf("failed to test cursor '%s' for seek accuracy: %d", cursor, r)
+	}
+
+	// if 0, it sought to the next closest position
+	if r == 0 {
+		return false, nil
+	}
+
+	// if positive, it sought to the exact position
+	return true, nil
 }
 
 // Wait will synchronously wait until the journal gets changed. The maximum time
