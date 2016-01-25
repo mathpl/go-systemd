@@ -345,6 +345,15 @@ func (j *Journal) GetDataAll() (JournalEntry, error) {
 		addToMap(data, name, value)
 	}
 
+	// Add catalog data as well if there is a MESSAGE_ID
+	_, ok := data["MESSAGE_ID"]
+	if ok {
+		catalogEntry, err := j.GetCatalog()
+		if err == nil {
+			data["CATALOG_ENTRY"] = catalogEntry
+		}
+	}
+
 	return data, nil
 }
 
@@ -512,6 +521,55 @@ func (j *Journal) TestCursor(cursor string) (bool, error) {
 
 	// if positive, it sought to the exact position
 	return true, nil
+}
+
+// GetCatalog retrieves a message catalog entry for the current journal entry.
+// This will look up an entry in the message catalog by using the "MESSAGE_ID="
+// field of the current journal entry. Before returning the entry all journal
+// field names in the catalog entry text enclosed in "@" will be replaced by the
+// respective field values of the current entry. If a field name referenced in
+// the message catalog entry does not exist, in the current journal entry, the
+// "@" will be removed, but the field name otherwise left untouched.
+func (j *Journal) GetCatalog() (string, error) {
+	var ccatalog *C.char
+
+	j.mu.Lock()
+	r := C.sd_journal_get_catalog(j.cjournal, (**C.char)(&ccatalog))
+	j.mu.Unlock()
+
+	defer C.free(unsafe.Pointer(ccatalog))
+
+	if r < 0 {
+		return "", fmt.Errorf("failed to retrieve catalog entry for current journal entry: %d", r)
+	}
+
+	catalog := C.GoString(ccatalog)
+	return catalog, nil
+}
+
+// GetCatalogForMessageID works similar to GetCatalog(), but the entry is looked
+// up by the specified message ID (no open journal context is necessary for
+// this), and no field substitution is performed.
+func GetCatalogForMessageID(messageId string) (string, error) {
+	cmessageId := C.CString(messageId)
+	defer C.free(unsafe.Pointer(cmessageId))
+
+	var mid C.sd_id128_t
+	r := C.sd_id128_from_string(cmessageId, &mid)
+	if r < 0 {
+		return "", fmt.Errorf("failed to get sd_id128_t from provided MESSAGE_ID '%s': %d", messageId, r)
+	}
+
+	var ccatalog *C.char
+	r = C.sd_journal_get_catalog_for_message_id(mid, (**C.char)(&ccatalog))
+	defer C.free(unsafe.Pointer(ccatalog))
+
+	if r < 0 {
+		return "", fmt.Errorf("failed to retrieve catalog entry for MESSAGE_ID '%s': %d", messageId, r)
+	}
+
+	catalog := C.GoString(ccatalog)
+	return catalog, nil
 }
 
 // Wait will synchronously wait until the journal gets changed. The maximum time
