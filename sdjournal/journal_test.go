@@ -20,6 +20,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/net/context"
+
 	"github.com/coreos/go-systemd/journal"
 )
 
@@ -63,8 +65,8 @@ func TestJournalFollow(t *testing.T) {
 	}()
 
 	// and follow the reader synchronously
-	timeout := time.Duration(5) * time.Second
-	if err = r.Follow(time.After(timeout), os.Stdout); err != ErrExpired {
+	ctx, _ := context.WithDeadline(context.Background(), time.Now().Add(time.Duration(5)*time.Second))
+	if err = r.Follow(ctx, os.Stdout); err != ErrExpired {
 		t.Fatalf("Error during follow: %s", err)
 	}
 }
