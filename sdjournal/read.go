@@ -22,6 +22,8 @@ import (
 	"io"
 	"log"
 	"time"
+
+	"golang.org/x/net/context"
 )
 
 var (
@@ -152,7 +154,7 @@ func (r *JournalReader) Close() error {
 // FollowJournal synchronously follows the JournalReader, writing each new journal entry to writer.
 // The follow will continue until any int is received on the until channel. All Journal entries
 // are pushed to the writer channel.
-func (r *JournalReader) FollowJournal(until <-chan int, writer chan<- JournalEntry) (err error) {
+func (r *JournalReader) FollowJournal(ctx context.Context, writer chan<- JournalEntry) (err error) {
 
 	// Process journal entries and events. Entries are flushed until the tail or
 	// timeout is reached, and then we wait for new events or the timeout.
@@ -164,7 +166,7 @@ process:
 		}
 
 		select {
-		case <-until:
+		case <-ctx.Done():
 			return ErrExpired
 		default:
 			if msg != nil {
@@ -185,12 +187,13 @@ process:
 					return
 				default:
 					events <- r.Journal.Wait(time.Duration(100) * time.Millisecond)
+					return
 				}
 			}
 		}()
 
 		select {
-		case <-until:
+		case <-ctx.Done():
 			pollDone <- true
 			return ErrExpired
 		case e := <-events:
@@ -210,7 +213,7 @@ process:
 
 // Follow synchronously follows the JournalReader, writing each new journal entry to writer. The
 // follow will continue until a single time.Time is received on the until channel.
-func (r *JournalReader) Follow(until <-chan time.Time, writer io.Writer) (err error) {
+func (r *JournalReader) Follow(ctx context.Context, writer io.Writer) (err error) {
 
 	// Process journal entries and events. Entries are flushed until the tail or
 	// timeout is reached, and then we wait for new events or the timeout.
@@ -224,7 +227,7 @@ process:
 		}
 
 		select {
-		case <-until:
+		case <-ctx.Done():
 			return ErrExpired
 		default:
 			if c > 0 {
@@ -250,7 +253,7 @@ process:
 		}()
 
 		select {
-		case <-until:
+		case <-ctx.Done():
 			pollDone <- true
 			return ErrExpired
 		case e := <-events:
